@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Infrastructure Ecosystem: WPT, Amazon & Sauce Labs</title>
+    <meta charset="utf-8">
+    <style>
+      @import url(https://fonts.googleapis.com/css?family=Yanone+Kaffeesatz);
+      @import url(https://fonts.googleapis.com/css?family=Droid+Serif:400,700,400italic);
+      @import url(https://fonts.googleapis.com/css?family=Ubuntu+Mono:400,700,400italic);
+
+      body { font-family: 'Droid Serif'; }
+      h1, h2, h3 {
+        font-family: 'Yanone Kaffeesatz';
+        font-weight: normal;
+      }
+      .remark-code, .remark-inline-code { font-family: 'Ubuntu Mono'; }
+
+      /* Remark style over rides */
+      .remark-slide-scaler {
+        box-shadow: none;
+      }
+      .remark-container {
+        background: none;
+      }
+
+      /* Custom content */
+      .remark-slide-content img {
+        max-width: 100%;
+        margin: 0 auto;
+        display: block;
+      }
+      .remark-slide-content .softer { opacity: 0.3; }
+      .remark-slide-content .license { position: absolute; bottom: 0; font-size: 0.6em; }
+      .remark-slide-content .license img {
+        margin: 0;
+        display: inline;
+        vertical-align: middle;
+      }
+      .remark-slide-content blockquote:before {
+        position: absolute;
+        top: -0.4em;
+        left: -0.2em;
+
+        content: '"';
+        font-family: serif;
+        font-size: 8em;
+        opacity: 0.3;
+      }
+      .remark-slide-content blockquote {
+        position: relative;
+
+        font-style: italic;
+      }
+    </style>
+  </head>
+  <body>
+    <textarea id="source">
+class: center, middle
+
+# WPT, Amazon & Sauce Labs
+
+2018-03-13
+
+.softer[
+
+(press the <kbd>p</kbd> key to view presenter's notes)
+
+]
+
+.license[
+
+<a rel="license" href="http://creativecommons.org/licenses/by-sa/4.0/"><img alt="Creative Commons License" src="./img/cc-by-sa.png" /></a>
+This presentation is licensed under a
+<a rel="license" href="http://creativecommons.org/licenses/by-sa/4.0/">Creative Commons Attribution-ShareAlike 4.0 International License</a>.
+
+]
+
+---
+class: center, middle
+
+# Part 1: Parallelization
+
+.softer[
+
+# Part 2: Troubleshooting
+
+# Part 3: Next Steps
+
+]
+
+---
+
+# Parallelization: Original Layout
+
+
+                       .-- EC2 --.
+                       |         |
+                  .--- | WPT CLI | WebDriver .- Sauce Labs -.
+                  |    |         | <-------> |    Edge      |
+                  |    '---------'           |      &       |
+                  |    .-- EC2 --. <-------> |    Safari    |
+                  |    |         | WebDriver '--------------'
+                  +--- | WPT CLI |
+                  |    |         |
+    .-- GCP --.   |    '---------'
+    | wpt.fyi | <-+    .Bytemark-.
+    '---------'   |    | WPT CLI |
+                  +--- |    &    |
+                  |    | Firefox |
+                  |    '---------'
+                  |    .Bytemark-.
+                  |    | WPT CLI |
+                  '--- |    &    |
+                       | Chrome  |
+                       '---------'
+
+---
+
+# Parallelization: New Layout
+
+
+                                      .-- EC2 --.
+                                      | WPT CLI |.            .- Sauce Labs -.
+    .-- GCP --.     .-- EC2 --.       |    &    ||. WebDriver |              |
+    | wpt.fyi | <-- | Leader  | <---> | Firefox ||| <-------> |    Edge      |
+    '---------'     '---------'       |    &    ||| WebDriver |      &       |
+                                      | Chrome  ||| <-------> |    Safari    |
+                                      '---------'|| WebDriver |              |
+                                       '-- x10 --'| <-------> '--------------'
+                                        '---------'
+
+---
+
+# Parallelization: Implemented with Buildbot
+
+![Buildbot logo](img/buildbot-logo.svg)
+
+> Buildbot is an open-source framework for automating software build, test, and
+> release processes.
+
+Used by: Python, WebKit, Mozilla, Chromium
+
+https://buildbot.net
+
+---
+
+# Parallelization: Buildbot "Workers"
+
+![](img/buildbot-workers.png)
+
+---
+
+# Parallelization: Buildbot "Builders"
+
+![](img/buildbot-builders.png)
+
+???
+
+We've implemented three "builders" for WPT:
+
+- Daily initiator - identifies a revision of WPT to use for results collection;
+  triggers builds for that revision
+- Chunked Runner - runs a specified subset of WPT in a specified browser;
+  conditionally triggers results uploading
+- Uploader - publishes the results to Google Cloud Platform
+
+---
+
+# Parallelization: Daily Initiator
+
+![](img/buildbot-build-daily-steps.png)
+
+???
+
+After determining which revision of WPT should be tested, this builder triggers
+a large number of partial tests. Currently, it is configured to segment WPT
+into 10 so-called "chunks" and schedule one build for each of those chunks in
+Firefox, Chrome, Safari, and Edge.
+
+---
+
+# Parallelization: Daily Initiator (continued)
+
+![](img/buildbot-build-daily-properties.png)
+
+???
+
+Each build is parameterized with "properties". The most salient property for
+this build is `got_revision`. This property is passed along to all the
+"chunked" builds which are triggered by the builder.
+
+---
+
+# Parallelization: Chunked Runner
+
+![](img/buildbot-build-chunk-steps.png)
+
+???
+
+- These are the steps performed by the "Chunked Runner" builder
+- "WPT Run" is configured as an allowed failure because a browser's performance
+  on the tests doesn't affect our desire to collect and publish results
+- "Validate results" is how we can interpret the meaning of the failed "WPT
+  Run" command (i.e. whether it reflects test failures or an error in the
+  infrastructure)
+- The build "master" collects the chunk results, but only uploads when results
+  are available for every chunk (more on this later)
+
+---
+
+# Parallelization: Chunked Runner (continued)
+
+![](img/buildbot-build-chunk-command.png)
+
+???
+
+As you would expect from any continuous integration solution, logs of each
+command are available for review.
+
+---
+
+# Parallelization: Authentication
+
+![](img/buildbot-auth-1.png)
+
+<hr />
+
+![](img/buildbot-auth-2.png)
+
+???
+
+Buildbot also offers integration with popular OAuth providers. In the current
+deployment, only members of the "bocoup" and "w3c" organizations on GitHub.com
+may influence builds via the web UI.
+
+Because test runs continue to crash intermittently, we can use this interface
+to re-try builds on demand. The "upload when all chunks are complete" heuristic
+described earlier means that these manually-triggered build can automatically
+provoke uploading.
+
+---
+class: center, middle
+
+.softer[
+
+# Part 1: Parallelization
+
+]
+
+# Part 2: Troubleshooting
+
+.softer[
+
+# Part 3: Next Steps
+
+]
+
+???
+
+- You may have noticed a lot of failed builds being reported in the preceding
+  screenshots.
+- The truth is that this new system has never produced complete results for
+  Edge or Safari
+- Understanding why took a bit of research
+
+---
+
+## Amazon EC2 CPU Credits
+
+![](img/ec2-cpu-credit-pricing.png)
+
+---
+
+## Usage during tests - single instance
+
+![](img/cpu-credit-balance-one.png)
+
+???
+
+Seemingly-giant dip in the CPU credits
+
+---
+
+## Usage during tests - single instance (scaled)
+
+![](img/cpu-credit-balance-one-scaled.png)
+
+Phew.
+
+???
+
+Relatively speaking, it was a drop in the bucket
+
+---
+
+## Usage during tests - all instances
+
+![](img/cpu-credit-balance-all.png)
+
+???
+
+All instances tell a similar story
+
+---
+
+## Usage during tests - all instance (scaled)
+
+![](img/cpu-credit-balance-all-scaled.png)
+
+???
+
+- This demonstrates that CPU was not the bottleneck
+- This was a false avenue, anyway: the utilization spikes coincided with tests
+  running in Chrome and Firefox
+- Running the tests against Safari and Edge via Sauce Labs did not trigger any
+  perceptible change in CPU utilization
+
+---
+
+## Sauce Labs API Rate Limiting
+
+![](img/sauce-labs-rate-limiting.png)
+
+https://wiki.saucelabs.com/display/DOCS/Rate+Limits+for+the+Sauce+Labs+REST+API
+
+???
+
+- The number 10 is suspicious--that's the number of concurrent testing sessions
+  we were attempting to run
+- I initially guessed that we were exhausting the 10-requests-per-second limit
+  and getting docked by Sauce Labs with an extended "cool off" state
+- I implemented a resource lock with Buildbot so the build master would
+  throttle itself and avoid this penalty
+- That did not work, so I began to research other sources of failure
+
+---
+
+## Network traffic
+
+![](img/network-out-one.png)
+
+---
+
+## Network traffic (including subsequent run)
+
+![](img/network-out-all.png)
+
+---
+
+## Network traffic (including previous run)
+
+![](img/network-out-with-prior.png)
+
+???
+
+- Each run included a single build ("chunk" number 9 out of 10) with a huge
+  amount of traffic
+- I was unaccustomed to looking at WPT from this perspective, so I didn't know
+  if/how this indicated infrastructure errors
+
+---
+
+## Overlaying tests
+
+![](img/network-spike-traffic.png)
+
+![](img/network-spike-tests.png)
+
+HTTP**S** :/
+
+???
+
+I ran the tests locally and waited for the traffic spike. It's all encrypted as
+it is sent to Sauce Labs, so I couldn't look at the data directly. But I was able
+to review the tests themselves.
+
+---
+
+## Prime suspect
+
+[css/css-text/i18n/css3-text-line-break-jazh-421.html](https://github.com/w3c/web-platform-tests/blob/de0c4ad1634bac712eadecf9a1a170eaf375ae8e/css/css-text/i18n/css3-text-line-break-jazh-421.html#L12-L16)
+
+```css
+@font-face {
+  font-family: 'mplus-1p-regular';
+  src: url('/fonts/mplus-1p-regular.woff') format('woff');
+  /* filesize: 803K */
+}
+```
+
+```shell
+$ grep mplus-1p-regular.woff css/css-text/i18n -r | wc -l
+834
+```
+
+???
+
+- That's a big font.
+- Running this "chunk" of tests involves sending a 800KB file to Sauce Labs
+  over 800 times.
+- Unfortunately, cancelling that build did not increase the reliability of the
+  other builds. In other words: the aberrant network utilization was a red
+  herring, but at least we know why it's happening.
+
+---
+class: center, middle
+
+> In this case I think restructuring the way your tests start to just have one
+> tunnel connecting and sending all the traffic would be best.
+
+\- Enrique Gonzalez, Sauce Labs support technician
+
+---
+class: center, middle
+
+.softer[
+
+# Part 1: Parallelization
+
+# Part 2: Troubleshooting
+
+]
+
+# Part 3: Next Steps
+
+---
+
+# Next step: Avoid Sauce Labs Rate Limits
+
+## Alternative #1
+
+                                      .-- EC2 --.
+                                      | WPT CLI |.            .- EC2 -.
+    .-- GCP --.     .-- EC2 --.       |    &    ||. WebDriver |       |
+    | wpt.fyi | <-- | Leader  | <---> | Firefox ||| <-------> |       |
+    '---------'     '---------'       |    &    ||| WebDriver | Proxy |
+                                      | Chrome  ||| <-------> |       |
+                                      '---------'|| WebDriver |       |
+                                       '-- x10 --'| <-------> '-------'
+                                        '---------'               ^
+                                                        WebDriver |
+                                                                  v
+                                                            .- Sauce Labs -.
+                                                            |    Edge      |
+                                                            |      &       |
+                                                            |    Safari    |
+                                                            '--------------'
+
+???
+
+- We can't naively scale the solution that WPT uses for communication with
+  Sauce Labs.
+- We're being rate limited because we are creating so many concurrent "tunnels"
+- To avoid this Sauce Labs, we would need to designate a small number of
+  servers to manage this connection, and direct all testing traffic through
+  that proxy.
+- De-multiplexing the traffic coming back from Sauce Labs will increase system
+  complexity further (DNS records, etc.)
+
+---
+
+# Next step: Avoid Sauce Labs Rate Limits
+
+## Alternative #2
+
+                                      .-- ??? --.
+                                      | WPT CLI |.
+                                  .-> |    &    ||.
+                                  |   | Safari  |||
+                                  |   '---------'||
+                                  |    '-- x N --'|
+                                  |     '---------'
+                                  |   .-- EC2 --.
+                                  |   | WPT CLI |.
+    .-- GCP --.     .-- EC2 --.   |   |    &    ||.
+    | wpt.fyi | <-- | Leader  | <-+-> | Firefox |||
+    '---------'     '---------'   |   |    &    |||
+                                  |   | Chrome  |||
+                                  |   '---------'||
+                                  |    '-- x N --'|
+                                  |     '---------'
+                                  |   .-- ??? --.
+                                  |   | WPT CLI |.
+                                  '-> |    &    ||.
+                                      |  Eddge  |||
+                                      '---------'||
+                                       '-- x N --'|
+                                        '---------'
+
+???
+
+Because we have another goal which Sauce Labs cannot help us reach (collecting
+results from unstable browsers), we're currently working to solve this by
+running machines without that service.
+
+The requirements to run a Buildbot workers are relatively easy to satisfy:
+
+- Python
+- Port 8898
+
+We can distribute the load without Sauce Labs by installing the workers
+directly on the machines running the target platforms.
+
+---
+
+# Next step: Avoid Sauce Labs Rate Limits
+
+## Alternative #3
+
+                                      .-- EC2 --.             .- ??? -.
+                                      | WPT CLI |.  WebDriver | Edge  |.
+    .-- GCP --.     .-- EC2 --.       |    &    ||. <-------> '-------'|.
+    | wpt.fyi | <-- | Leader  | <---> | Firefox |||            '- x N -'|
+    '---------'     '---------'       |    &    |||             '-------'
+                                      | Chrome  |||           .-- ??? --.
+                                      '---------'|| WebDriver | Safari  |.
+                                       '-- x N --'| <-------> '---------'|.
+                                        '---------'            '-- x N --'|
+                                                                '---------'
+
+???
+
+We might also choose to expose WebDriver endpoints instead. This requires more
+network configuration, so it is probably better to defer for the time being.
+It's worth shooting for because it makes the division of responsibility more
+clear.
+
+---
+class: center, middle
+
+# Thanks!
+
+mike@bocoup.com
+    </textarea>
+    <script src="remark.js">
+    </script>
+    <script>
+      var slideshow = remark.create();
+    </script>
+  </body>
+</html>
